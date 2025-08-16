@@ -1,4 +1,5 @@
 name: build-and-deploy
+
 on:
   push:
     branches: [ main ]
@@ -15,10 +16,14 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write        # <-- required for OIDC
+      id-token: write      # required for OIDC
       contents: read
     steps:
       - uses: actions/checkout@v4
+
+      # TEMP: print what subject GitHub sends; delete after you verify it
+      - name: Show OIDC subject GitHub sends
+        run: echo "repo:${{ github.repository }}:ref:${{ github.ref }}"
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
