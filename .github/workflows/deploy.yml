@@ -1,0 +1,64 @@
+name: build-and-deploy
+on:
+  push:
+    branches: [ main ]
+
+env:
+  ACR_NAME: acrrag709278
+  IMAGE_NAME: rag-azure
+  RG: rg-rag
+  ACA_ENV: aca-env-rag
+  ACA_APP: aca-rag
+  LOCATION: ukwest
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write        # <-- required for OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:  ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure containerapp extension is available
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az config set extension.use_dynamic_install=yes_without_prompt
+            az extension show -n containerapp || az extension add -n containerapp
+
+      - name: ACR login (RBAC via OIDC)
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az acr login -n ${{ env.ACR_NAME }}
+
+      - name: Build & push image to ACR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Deploy new image to Azure Container Apps
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az containerapp update \
+              -g ${{ env.RG }} -n ${{ env.ACA_APP }} \
+              --image ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Show public URL
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            FQDN=$(az containerapp show -g ${{ env.RG }} -n ${{ env.ACA_APP }} --query properties.configuration.ingress.fqdn -o tsv)
+            echo "Live docs: https://$FQDN/docs"
