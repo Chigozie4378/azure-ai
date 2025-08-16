@@ -1,0 +1,372 @@
+
+===== requirements.txt =====
+fastapi
+uvicorn[standard]
+python-dotenv
+pydantic
+pyjwt
+langchain
+langchain-openai
+langchain-community
+azure-search-documents
+azure-core
+pypdf
+python-docx
+
+===== Dockerfile =====
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+EXPOSE 8080
+
+# Run FastAPI with Uvicorn on port 8080
+CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8080"]
+
+===== .env (template / DO NOT COMMIT REAL SECRETS) =====
+# Auth
+JWT_SECRET=change-me
+JWT_ALG=HS256
+
+# OpenAI
+OPENAI_API_KEY=sk-...
+
+# Azure AI Search
+AZ_SEARCH_INDEX=docs-index
+AZ_SEARCH_ENDPOINT=https://<your-search>.search.windows.net
+AZ_SEARCH_API_KEY=<your-admin-key>
+
+===== app/settings.py =====
+from pydantic import BaseSettings
+from functools import lru_cache
+
+class Settings(BaseSettings):
+    AZ_SEARCH_ENDPOINT: str
+    AZ_SEARCH_API_KEY: str
+    AZ_SEARCH_INDEX: str = "docs-index"
+
+    OPENAI_API_KEY: str
+
+    JWT_SECRET: str = "change-me"
+    JWT_ALG: str = "HS256"
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
+
+@lru_cache
+def get_settings() -> "Settings":
+    return Settings()
+
+settings = get_settings()
+
+===== app/auth.py =====
+import time
+import jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from app.settings import settings
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+def create_access_token(sub: str) -> str:
+    now = int(time.time())
+    payload = {"sub": sub, "iat": now, "exp": now + 60 * 60}  # 1 hour
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALG)
+
+def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
+        return payload.get("sub", "anonymous")
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+===== app/api.py =====
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.security import OAuth2PasswordRequestForm
+from app.auth import create_access_token, get_current_user
+from app.rag import answer_query
+
+app = FastAPI(
+    title="RAG on Azure",
+    version="0.1.0",
+    description="FastAPI + LangChain + Azure AI Search RAG service",
+)
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok"}
+
+@app.post("/token")
+def token(form_data: OAuth2PasswordRequestForm = Depends()) -> dict:
+    # Accept any non-empty username & password for demo purposes
+    if not form_data.username or not form_data.password:
+        raise HTTPException(status_code=400, detail="username and password are required")
+    return {"access_token": create_access_token(form_data.username), "token_type": "bearer"}
+
+@app.post("/query")
+def query(q: str, user: str = Depends(get_current_user)) -> dict:
+    result = answer_query(q)
+    return {"answer": result["answer"], "sources": result["sources"]}
+
+===== app/rag.py =====
+from app.settings import settings
+from langchain_community.retrievers.azure_ai_search import AzureAISearchRetriever
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+
+def _retriever():
+    return AzureAISearchRetriever(
+        content_key="content",
+        embedding_key="embedding",
+        index_name=settings.AZ_SEARCH_INDEX,
+        api_key=settings.AZ_SEARCH_API_KEY,
+        service_endpoint=settings.AZ_SEARCH_ENDPOINT,
+    )
+
+def answer_query(question: str) -> dict:
+    # Retrieve top-5 relevant chunks from Azure AI Search
+    retriever = _retriever()
+    docs = retriever.get_relevant_documents(question, top_k=5)
+
+    # Build a grounded prompt with retrieved context
+    context = "\\n\\n---\\n\\n".join([d.page_content for d in docs])
+    prompt = ChatPromptTemplate.from_template(
+        "You are a helpful assistant. Use ONLY the context to answer. "
+        "If the answer cannot be found in the context, say you don't know.\\n\\n"
+        "Context:\\n{context}\\n\\nQuestion: {question}\\n\\nAnswer:"
+    )
+    llm = ChatOpenAI(model="gpt-4o-mini", api_key=settings.OPENAI_API_KEY, temperature=0)
+    msg = prompt.format_messages(context=context, question=question)
+    resp = llm.invoke(msg)
+
+    sources = [d.metadata.get("source") for d in docs if d.metadata and d.metadata.get("source")]
+    return {"answer": resp.content, "sources": sources}
+
+===== app/ingest/index_schema.json =====
+{
+  "name": "docs-index",
+  "fields": [
+    { "name": "id", "type": "Edm.String", "key": true, "filterable": true },
+    { "name": "content", "type": "Edm.String", "searchable": true },
+    {
+      "name": "embedding",
+      "type": "Collection(Edm.Single)",
+      "searchable": true,
+      "dimensions": 1536,
+      "vectorSearchProfile": "vs-profile"
+    },
+    { "name": "source", "type": "Edm.String", "filterable": true, "searchable": true }
+  ],
+  "vectorSearch": {
+    "profiles": [
+      { "name": "vs-profile", "algorithm": "hnsw-alg" }
+    ],
+    "algorithms": [
+      { "name": "hnsw-alg", "kind": "hnsw" }
+    ]
+  }
+}
+
+===== app/ingest/chunkers.py =====
+from typing import List
+
+def chunk_text(text: str, chunk_size: int = 800, overlap: int = 120) -> List[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+    chunks: List[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(n, start + chunk_size)
+        chunk = text[start:end]
+        chunks.append(chunk)
+        if end == n:
+            break
+        start = max(0, end - overlap)
+    return chunks
+
+===== app/ingest/readers.py =====
+import os
+from typing import Tuple
+
+def _read_txt(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+def _read_pdf(path: str) -> str:
+    from pypdf import PdfReader
+    reader = PdfReader(path)
+    return "\\n".join(page.extract_text() or "" for page in reader.pages)
+
+def _read_docx(path: str) -> str:
+    import docx  # python-docx
+    doc = docx.Document(path)
+    return "\\n".join(p.text for p in doc.paragraphs)
+
+def load_text(path: str) -> Tuple[str, str]:
+    \"\"\"Return (text, filename) for txt/pdf/docx.\"\"\"
+    ext = os.path.splitext(path)[1].lower()
+    fname = os.path.basename(path)
+    if ext in [".txt"]:
+        return _read_txt(path), fname
+    if ext in [".pdf"]:
+        return _read_pdf(path), fname
+    if ext in [".doc", ".docx"]:
+        return _read_docx(path), fname
+    # Fallback: read bytes as text
+    return _read_txt(path), fname
+
+===== app/ingest/load_docs.py =====
+from dotenv import load_dotenv
+load_dotenv()
+
+import os
+import json
+import glob
+import re
+import base64
+from typing import List, Dict
+
+from azure.core.credentials import AzureKeyCredential
+from azure.search.documents import SearchClient
+from azure.search.documents.indexes import SearchIndexClient
+from azure.search.documents.indexes.models import SearchIndex
+
+from langchain_openai import OpenAIEmbeddings
+
+from app.settings import settings
+from app.ingest.chunkers import chunk_text
+from app.ingest.readers import load_text
+
+ENDPOINT = settings.AZ_SEARCH_ENDPOINT
+KEY = settings.AZ_SEARCH_API_KEY
+INDEX = settings.AZ_SEARCH_INDEX
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+def safe_id(filename: str, idx: int) -> str:
+    stem = os.path.basename(filename)
+    stem = re.sub(r\"[^A-Za-z0-9_\\-=]\", \"-\", stem)
+    return f\"{stem}-{idx}\"
+
+def safe_id_b64(filename: str, idx: int) -> str:
+    raw = f\"{os.path.basename(filename)}-{idx}\"
+    b64 = base64.urlsafe_b64encode(raw.encode(\"utf-8\")).decode(\"ascii\")
+    return b64.rstrip(\"=\")
+
+def ensure_index() -> None:
+    idx_client = SearchIndexClient(ENDPOINT, AzureKeyCredential(KEY))
+    try:
+        idx_client.get_index(INDEX)
+        log(f\"Index '{INDEX}' already exists.\")
+        return
+    except Exception:
+        pass
+
+    schema_path = os.path.join(os.path.dirname(__file__), \"index_schema.json\")
+    with open(schema_path, \"r\", encoding=\"utf-8\") as f:
+        schema = json.load(f)
+
+    schema[\"name\"] = INDEX
+    idx_client.create_index(SearchIndex.deserialize(schema))
+    log(f\"Created index '{INDEX}'.\")
+
+def make_embeddings():
+    if not settings.OPENAI_API_KEY:
+        raise RuntimeError(\"OPENAI_API_KEY not set; add it to .env\")
+    return OpenAIEmbeddings(model=\"text-embedding-3-small\", api_key=settings.OPENAI_API_KEY)
+
+def build_docs(path_glob: str = \"data/*.*\") -> List[Dict]:
+    embeddings = make_embeddings()
+    out: List[Dict] = []
+    for path in glob.glob(path_glob):
+        text, fname = load_text(path)
+        chunks = chunk_text(text)
+        for i, ch in enumerate(chunks):
+            vec = embeddings.embed_query(ch)
+            doc_id = re.sub(r\"[^A-Za-z0-9_-]\", \"-\", f\"{fname}-{i}\")
+            out.append({
+                \"id\": doc_id,
+                \"content\": ch,
+                \"embedding\": vec,
+                \"source\": fname
+            })
+        if chunks:
+            log(f\"Prepared {len(chunks)} chunks from {fname}\")
+    return out
+
+def upload_docs(docs: List[Dict]) -> None:
+    sc = SearchClient(ENDPOINT, INDEX, AzureKeyCredential(KEY))
+    BATCH = 500
+    total = len(docs)
+    for i in range(0, total, BATCH):
+        batch = docs[i:i+BATCH]
+        results = sc.upload_documents(batch)
+        failed = [r for r in results if not r.succeeded]
+        if failed:
+            log(f\"⚠️  {len(failed)} docs failed in batch starting at {i}. Example: {failed[0]}\")
+        log(f\"Uploaded {min(i+BATCH, total)}/{total} documents\")
+
+if __name__ == \"__main__\":
+    if not ENDPOINT or not KEY:
+        raise SystemExit(\"Set AZ_SEARCH_ENDPOINT and AZ_SEARCH_API_KEY in .env\")
+    log(f\"OPENAI_API_KEY loaded? {bool(settings.OPENAI_API_KEY)}\")
+    ensure_index()
+    docs = build_docs(\"data/*.txt\")
+    if docs:
+        upload_docs(docs)
+        print(f\"✅ Done. Uploaded {len(docs)} docs to index '{INDEX}'.\")
+    else:
+        print(\"No docs prepared. Put some .txt files in ./data and try again.\")
+
+===== app/ingest/delete_docs.py =====
+import argparse
+from typing import List
+from azure.core.credentials import AzureKeyCredential
+from azure.search.documents import SearchClient
+from app.settings import settings
+
+def delete_by_source(source_filename: str) -> int:
+    client = SearchClient(
+        settings.AZ_SEARCH_ENDPOINT,
+        settings.AZ_SEARCH_INDEX,
+        AzureKeyCredential(settings.AZ_SEARCH_API_KEY),
+    )
+
+    # Find all documents whose 'source' matches
+    results = client.search(search_text=\"*\", filter=f\"source eq '{source_filename}'\", select=[\"id\", \"source\"])
+    ids: List[str] = [doc[\"id\"] for doc in results]
+
+    if not ids:
+        print(f\"No documents found with source='{source_filename}'.\")
+        return 0
+
+    # Delete by keys
+    to_delete = [{\"id\": i} for i in ids]
+    resp = client.delete_documents(documents=to_delete)
+    deleted = sum(1 for r in resp if r.succeeded)
+    print(f\"Deleted {deleted} documents for source='{source_filename}'.\")
+    return deleted
+
+if __name__ == \"__main__\":
+    parser = argparse.ArgumentParser(description=\"Delete docs in Azure AI Search by source filename.\")
+    parser.add_argument(\"--source\", required=True, help=\"e.g., faq.txt\")
+    args = parser.parse_args()
+    delete_by_source(args.source)
+
+===== tests/api_key_test.py =====
+# Quick sanity test to verify your OpenAI key works
+from openai import OpenAI
+client = OpenAI()
+models = client.models.list()
+print(f\"✅ Works! Found {len(models.data)} models.\")

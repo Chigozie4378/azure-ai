@@ -1,0 +1,23 @@
+{
+  "name": "docs-index",
+  "fields": [
+    { "name": "id", "type": "Edm.String", "key": true, "filterable": true },
+    { "name": "content", "type": "Edm.String", "searchable": true },
+    {
+      "name": "embedding",
+      "type": "Collection(Edm.Single)",
+      "searchable": true,
+      "dimensions": 1536,
+      "vectorSearchProfile": "vs-profile"
+    },
+    { "name": "source", "type": "Edm.String", "filterable": true, "searchable": true }
+  ],
+  "vectorSearch": {
+    "profiles": [
+      { "name": "vs-profile", "algorithm": "hnsw-alg" }
+    ],
+    "algorithms": [
+      { "name": "hnsw-alg", "kind": "hnsw" }
+    ]
+  }
+}

@@ -1,0 +1,41 @@
+ni .gitignore -Value @"
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.build/
+dist/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# --- Envs & secrets ---
+.venv/
+venv/
+.env
+.env.*
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log
+
+# --- Docker/temp ---
+*.local
+
+# (Optional) If you don't want to commit large/private docs, uncomment:
+# data/*
+# !data/README.md
+# !data/.keep
+"@

@@ -1,0 +1,46 @@
+0) Local prep (once)
+# From your project folder
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+Why: sets up an isolated Python env so uvicorn, fastapi, Azure SDKs, etc., don’t clash with system Python.
+
+
+1) Login to Azure & pick the right subscription
+# If you see an MFA / tenant prompt, log in directly to your tenant
+az login --tenant 1794c864-a6bb-4f2d-8c5b-9f80e261ba6b
+
+# See subscriptions you actually have
+az account list -o table
+
+# Set the subscription you’ll use
+$subId = az account list --query "[?name=='Azure subscription 1'].id | [0]" -o tsv
+az account set --subscription $subId
+
+# Verify
+az account show --query "{name:name,id:id,tenantId:tenantId}" -o table
+
+Why: Azure CLI needs to know which tenant & subscription to bill and create resources in. This also fixed your “No subscriptions found” / tenant confusion.
+
+
+2) Resource Group (a “folder” for all resources)
+$rg = "rg-rag"
+$loc = "ukwest"   # region
+
+az group create --name $rg --location $loc
+
+Why: Everything goes inside a resource group; deleting it later cleans up all resources (great for cost control).
+
+
+3) Register missing providers (one-time)
+powershell
+Copy
+Edit
+az provider register -n Microsoft.Search --wait
+az provider register -n Microsoft.ContainerRegistry --wait
+az provider register -n Microsoft.App --wait
+az provider register -n Microsoft.OperationalInsights --wait
+Why: You can’t create Search, ACR, or Container Apps until these providers are registered. This fixed the “subscription is not registered to use namespace …” errors.
+
+
