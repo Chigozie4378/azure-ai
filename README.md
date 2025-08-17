@@ -3,7 +3,7 @@
 ## Summary
 
 This is a small but realistic Retrieval-Augmented Generation (RAG) service. It ingests documents, splits them into chunks, creates embeddings, and stores both text and vectors in Azure AI Search. A secure FastAPI API retrieves the most relevant chunks and asks an LLM to answer using only those chunks as context. The service runs in a Docker container, images live in Azure Container Registry (ACR), and it’s deployed to Azure Container Apps for a public, autoscaling runtime.
-
+All sensitive credentials (OpenAI keys, Azure Search keys, JWT secrets) are stored in Azure Key Vault, retrieved at runtime by the Container App via managed identity, and exposed to the app as environment variables.
 ---
 
 ## Live Demo
@@ -51,13 +51,13 @@ The API is protected with a short-lived Bearer token (JWT) obtained from POST /t
 
 ## Architecture at a Glance
 
-* Client → FastAPI (JWT auth, OpenAPI docs).
-* Retrieval pipeline → LangChain retriever backed by Azure AI Search (HNSW vectors + keyword).
-* LLM and embeddings → OpenAI API (can be swapped for Azure OpenAI later).
-* Container image → Docker; stored in Azure Container Registry.
-* Runtime → Azure Container Apps with external ingress, autoscaling, revisions, and rollbacks.
-* Secrets → Injected as Container Apps secrets and read via environment variables (Key Vault is an easy next step).
-* Observability → Container logs/metrics in Azure Monitor/Log Analytics; health endpoint for probes.
+* Client -> FastAPI (JWT auth, OpenAPI docs).
+* Retrieval pipeline -> LangChain retriever backed by Azure AI Search (HNSW vectors + keyword).
+* LLM and embeddings -> OpenAI API (can be swapped for Azure OpenAI later).
+* Container image -> Docker; stored in Azure Container Registry.
+* Runtime -> Azure Container Apps with external ingress, autoscaling, revisions, and rollbacks.
+* Secrets -> Stored in Azure Key Vault; injected into Container Apps via managed identity and mounted as environment variables.
+* Observability -> Container logs/metrics in Azure Monitor/Log Analytics; health endpoint for probes.
 
 ---
 
@@ -66,7 +66,7 @@ The API is protected with a short-lived Bearer token (JWT) obtained from POST /t
 * app/api.py — FastAPI routes: /health, /token, /query (exposes Swagger).
 * app/rag.py — RAG orchestration: builds the Search retriever, crafts the prompt, calls the LLM, returns sources.
 * app/auth.py — Lightweight OAuth2/JWT for a realistic bearer-token flow.
-* app/settings.py — Central configuration; reads environment variables for endpoints and keys.
+* app/settings.py — Central configuration; reads environment variables that are populated at runtime from Key Vault.
 * app/ingest/index\_schema.json — Azure AI Search index definition (fields and vector profile).
 * app/ingest/readers.py — File readers for .txt, .pdf (PyPDF), .docx (python-docx).
 * app/ingest/chunkers.py — Splits text into embedding-friendly chunks.
@@ -93,7 +93,7 @@ The API is protected with a short-lived Bearer token (JWT) obtained from POST /t
 1. Create and activate a virtual environment, then install dependencies.
 2. Populate .env with: OPENAI\_API\_KEY, AZ\_SEARCH\_ENDPOINT, AZ\_SEARCH\_API\_KEY, AZ\_SEARCH\_INDEX, JWT\_SECRET, JWT\_ALG.
 3. Run the API locally with Uvicorn (app.api\:app), reload enabled, on port 8000.
-4. Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) to test.
+4. Open http://127.0.0.1:8000/docs to test.
 5. Ingest local docs before querying by running the ingestion loader.
 
 ---
@@ -128,7 +128,18 @@ The app reads these variables:
 * JWT\_SECRET (secret for signing demo JWTs)
 * JWT\_ALG (e.g., HS256)
 
-In Azure Container Apps, store values as secrets (lowercase, hyphenated names are required by Container Apps) and map them to the environment variables above. Rotating a secret does not require rebuilding the image.
+How they are provided in Azure
+
+* Each secret is stored in Azure Key Vault (e.g., kv-rag-12345).
+* The Container App (aca-rag) has a system-assigned managed identity with Key Vault Secrets User role.
+* Container Apps secrets reference Key Vault URIs (e.g., keyvault://kv-rag-12345/secrets/OpenAIKey) and map them to environment variables.
+* Example mapping inside Container Apps:
+  """
+  OPENAI_API_KEY=secretref:openaikey
+  AZ_SEARCH_API_KEY=secretref:az-search-api-key
+  JWT_SECRET=secretref:jwt-secret
+  """
+Rotating a secret in Key Vault does not require redeploys; the Container App refreshes automatically.
 
 ---
 
@@ -159,6 +170,11 @@ The workflow prints the public URL (FQDN) after deployment. Live API docs remain
 
 * The query endpoint is protected by JWT for demo purposes; real identity (Azure AD, APIM) can be added without code changes.
 * No secrets in code or image; secrets are provided via environment variables and stored as Container Apps secrets (next step: Azure Key Vault with managed identity).
+* Retrieval-augmented generation reduces hallucinations and returns sources for traceability.
+* The query endpoint is protected by JWT for demo purposes; real identity (Azure AD, APIM) can be added without code changes.
+* Secrets are never stored in code, image, or GitHub.
+    * Local dev uses .env (gitignored).
+    * Cloud runtime uses Key Vault + managed identity to provide secrets.
 * Retrieval-augmented generation reduces hallucinations and returns sources for traceability.
 
 ---
