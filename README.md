@@ -4,8 +4,8 @@
 
 This is a small but realistic Retrieval-Augmented Generation (RAG) service. It ingests documents, splits them into chunks, creates embeddings, and stores both text and vectors in Azure AI Search. A secure FastAPI API retrieves the most relevant chunks and asks an LLM to answer using only those chunks as context. The service runs in a Docker container, images live in Azure Container Registry (ACR), and it’s deployed to Azure Container Apps for a public, autoscaling runtime.
 All sensitive credentials (OpenAI keys, Azure Search keys, JWT secrets) are stored in Azure Key Vault, retrieved at runtime by the Container App via managed identity, and exposed to the app as environment variables.
----
 
+---
 ## Live Demo
 
 Swagger (API docs): [https://aca-rag.wittysand-46da5683.ukwest.azurecontainerapps.io/docs](https://aca-rag.wittysand-46da5683.ukwest.azurecontainerapps.io/docs)
