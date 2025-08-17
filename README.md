@@ -247,7 +247,6 @@ Live testing: [https://aca-rag.wittysand-46da5683.ukwest.azurecontainerapps.io/d
 
 ## Roadmap (easy next steps)
 
-* Move secrets to Azure Key Vault with managed identity.
 * Add Azure API Management (APIM) for governance (keys, quotas, IP rules, versioning).
 * Add PR preview deployments and post-deploy smoke tests to CI/CD.
 * Add evaluation (Ragas/Promptfoo) and light guardrails (citation checks, refusals).
