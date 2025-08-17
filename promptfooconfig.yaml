@@ -1,0 +1,48 @@
+version: 1
+
+providers:
+  - id: openai:chat:gpt-4o-mini
+    config:
+      temperature: 0
+
+prompts:
+  - id: RAG_answer_with_citations_v3
+    raw: |
+      You are a precise RAG assistant. You MUST answer ONLY using the provided Context.
+      If the answer is not in the Context, reply exactly: NOCONTEXT.
+      Include one or more citations like [source:<filename>] using the provided Sources.
+
+      Question: {{question}}
+
+      Context:
+      {{#each chunks}}
+      - {{this}}
+      {{/each}}
+
+      Sources: {{sources}}
+
+      Answer:
+
+tests:
+  - vars:
+      question: "What is the purpose of this project?"
+      chunks:
+        - "This project is a small, production-style Knowledge API you can put in front of business users or internal products."
+        - "It lets people ask questions against your own documents and get grounded, accurate answers (Retrieval-Augmented Generation)."
+        - "It’s built with FastAPI and LangChain, uses Azure AI Search for vector retrieval, and runs as a container on Azure Container Apps."
+      sources: "about.txt"
+    assert:
+      - type: contains
+        value: "Knowledge API"
+      - type: contains
+        value: "Retrieval-Augmented Generation"
+      - type: contains
+        value: "FastAPI"
+      - type: contains
+        value: "Azure AI Search"
+      - type: contains
+        value: "Azure Container Apps"
+      - type: contains
+        value: "[source:about.txt]"
+      - type: not-contains
+        value: "NOCONTEXT"
