@@ -3,7 +3,7 @@
 ## Summary
 
 This is a small but realistic Retrieval-Augmented Generation (RAG) service. It ingests documents, splits them into chunks, creates embeddings, and stores both text and vectors in Azure AI Search. A secure FastAPI API retrieves the most relevant chunks and asks an LLM to answer using only those chunks as context. The service runs in a Docker container, images live in Azure Container Registry (ACR), and it’s deployed to Azure Container Apps for a public, autoscaling runtime.
-All sensitive credentials (OpenAI keys, Azure Search keys, JWT secrets) are stored in Azure Key Vault, retrieved at runtime by the Container App via managed identity, and exposed to the app as environment variables.
+All sensitive credentials (OpenAI keys, Azure Search keys, JWT secrets) are stored in Azure Key Vault, retrieved at runtime by the Container App via managed identity, and exposed to the app as environment variables. This project includes light guardrails (citation requirement and refusal when context is weak) and automated quality checks using Promptfoo and Ragas that run in CI.
 
 ---
 ## Live Demo
@@ -57,6 +57,7 @@ The API is protected with a short-lived Bearer token (JWT) obtained from POST /t
 * Container image -> Docker; stored in Azure Container Registry.
 * Runtime -> Azure Container Apps with external ingress, autoscaling, revisions, and rollbacks.
 * Secrets -> Stored in Azure Key Vault; injected into Container Apps via managed identity and mounted as environment variables.
+* Quality & safety → Guardrails enforce citations and refuse answers when retrieved context is insufficient; automated evaluation (Promptfoo + Ragas) validates answer quality in CI.
 * Observability -> Container logs/metrics in Azure Monitor/Log Analytics; health endpoint for probes.
 
 ---
@@ -73,7 +74,11 @@ The API is protected with a short-lived Bearer token (JWT) obtained from POST /t
 * app/ingest/load\_docs.py — Ensures the index exists, embeds chunks, and upserts documents to Search.
 * app/ingest/delete\_docs.py — Deletes documents from the index (by filename, glob pattern, or all).
 * data/ — Example input documents (about.txt, faq.txt).
+* .github/workflows/build-and-deploy.yml (or deploy.yml) — Builds the Docker image, logs into Azure with OIDC, pushes to Azure Container Registry (ACR) using an ephemeral ACR token (no docker-in-docker), updates Azure Container Apps to the new image, and prints the live /docs URL.
 * tests/api\_key\_test.py — Small sanity check for your OpenAI key.
+* promptfooconfig.yaml — Promptfoo scenarios that validate grounded answers and required citations.
+* eval_ragas.py — Small Ragas dataset and thresholds to score faithfulness, answer relevancy, and context precision.
+* .github/workflows/ci-eval.yml — GitHub Actions workflow: Azure OIDC login, fetches secrets from Key Vault, runs Promptfoo and Ragas.
 * Dockerfile — Production image build for the API.
 * requirements.txt — Python dependencies.
 * .env — Local development variables (do not commit secrets to public repos).
@@ -164,6 +169,11 @@ Remain in Container Apps; they are not stored in GitHub and do not require redep
 
 The workflow prints the public URL (FQDN) after deployment. Live API docs remain at: [https://aca-rag.wittysand-46da5683.ukwest.azurecontainerapps.io/docs](https://aca-rag.wittysand-46da5683.ukwest.azurecontainerapps.io/docs)
 
+### Quality gates
+* The evaluation workflow runs on pushes and pull requests to main.
+* It logs into Azure via OIDC, reads OPENAI_API_KEY from Key Vault, then executes Promptfoo and Ragas.
+* Pull requests are expected to pass these checks before merge (prevents silent quality regressions).
+
 ---
 
 ## Security and Privacy
@@ -176,6 +186,36 @@ The workflow prints the public URL (FQDN) after deployment. Live API docs remain
     * Local dev uses .env (gitignored).
     * Cloud runtime uses Key Vault + managed identity to provide secrets.
 * Retrieval-augmented generation reduces hallucinations and returns sources for traceability.
+* Guardrails enforce “answer only with context”; low-confidence or empty retrieval returns a 422 refusal rather than an ungrounded response.
+* Mandatory [source:<filename>] citations ensure traceability for every answer.
+
+---
+
+## Evaluation & Guardrails
+
+Why
+
+* Reduce hallucinations and keep answers traceable.
+
+* Catch regressions automatically when prompts or retrieval change.
+
+* Give recruiters and reviewers a clear signal that quality is measured, not assumed.
+
+How it behaves
+
+* If retrieval returns too little/low-confidence context, the API refuses instead of guessing and returns a 422 with a helpful message.
+
+* Answers must include inline citations in the form [source:<filename>]. Missing citations trigger a 422 response.
+
+* Answers are concise and grounded strictly in retrieved context.
+
+What runs in CI
+
+* Promptfoo: unit-style checks that feed known “chunks” and assert the answer includes required phrases and [source:…] citations.
+
+* Ragas: dataset-based scoring (faithfulness, answer relevancy, context precision). The build fails if scores drop below configured thresholds.
+
+* CI authenticates to Azure with OIDC, pulls OPENAI_API_KEY from Key Vault, then runs both evaluations.
 
 ---
 
@@ -249,7 +289,6 @@ Live testing: [https://aca-rag.wittysand-46da5683.ukwest.azurecontainerapps.io/d
 
 * Add Azure API Management (APIM) for governance (keys, quotas, IP rules, versioning).
 * Add PR preview deployments and post-deploy smoke tests to CI/CD.
-* Add evaluation (Ragas/Promptfoo) and light guardrails (citation checks, refusals).
 * Build a tiny UI that calls the API and shows sources inline.
 * Private networking and storage-backed ingestion for sensitive corpora.
 
